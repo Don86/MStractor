@@ -1,3 +1,5 @@
+
+#####Bioconductor version 3.7#### R 3.5.1
 #
 # MStractor- A molecular feature extractor for mass spectrometry data
 #
@@ -93,13 +95,13 @@ gc()
 #       "/home/$HOME" on Linux
 
 #pathToProject <- "D:/MStractorDemo"
-pathToProject <- "D:/MyProject"
+pathToProject <- "C:/Users/your working directory/MStractor_dataset"# "your working directory" correponds to the path where the example data set is saved
 setwd(pathToProject)
 getwd()
 
 # Specify a "typical" MS file which can be considered a reference. Leave blank
 # for MStractorDemo.
-ref <- "./MSfiles/Control/MSfileC1.mzXML"
+ref <- "./MSfiles/Pooled/pooled_R1.mzXML"
 
 #QCdataAll <- TRUE # IF TRUE, EICs for every molecular feature will be plotted
 CPUs <- "max"      # Concurrent CPU threads to run. "max" to autodetect
@@ -182,19 +184,10 @@ if ((basename(pathToProject) == "MStractorDemo")
   pkgsBioC <- c(pkgsCRAN,"faahKO")
 }
 
-source("http://bioconductor.org/biocLite.R")
+source("https://bioconductor.org/biocLite.R")
+biocLite("xcms")
+biocLite("CAMERA") # Don't update any package
 
-# Ensure base packages are installed and auto-update others
-if (updatePackages == TRUE){
-  biocLite(suppressUpdates= FALSE, suppressAutoUpdate= FALSE, ask= FALSE, lib.loc= libUser)
-} else {
-  biocLite(suppressUpdates= TRUE, suppressAutoUpdate= FALSE, lib= libUser)
-}
-
-for (i in pkgsBioC) {
-  if(i %in% rownames(installed.packages()) == FALSE){
-    biocLite(i, suppressUpdates= TRUE, dependencies = TRUE, lib= libUser)}
-}
 
 # Load libraries
 library(xcms)
@@ -250,6 +243,9 @@ if (basename(pathToProject) == "MStractorDemo"){
 
 cat("The following MS files have been loaded:\n", rawfiles, fill= TRUE, sep="")
 
+
+
+
 # Load a reference file & define the scan range
 # Set mz step size for seeking new EIC traces
 profmethod <- "bin"
@@ -290,21 +286,6 @@ integ <- 1
 fitGauss <- FALSE
 sleep <- 0
 
-# Plot picked peaks to file
-#sleep <- 0.001
-#png(file.path("./QC/Pks/%003d.png"), h=768, w=1024)
-refPks <- findPeaks(refRaw, method= 'centWave', ppm= mzErrPpmMin*2,
-                    peakwidth= c(pwMin, pwMax), snthresh= snThresh,
-                    prefilter= c(5,intThresh), mzCenterFun= "mean",
-                    integrate= integ, mzdiff= mzdiff, verbose.columns= TRUE,
-                    fitgauss= fitGauss, noise= intThresh, sleep= sleep)
-#dev.off()
-#Pks <- refPks[,c("rt","mz","maxo","into","intb","sn","egauss")]
-#write.table(Pks, file= "./Pks.tsv", sep="\t")
-
-png("./QC/Ref_EICs_100.png", width = 1024, height = 768, units = "px")
-plotPeaks(refRaw, refPks,  c(10,10), width = FWHM_min*10)
-dev.off()
 
 # Create xcms data set
 # Using Centwave
