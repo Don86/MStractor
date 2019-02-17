@@ -1,5 +1,5 @@
 
-#####Bioconductor version 3.7#### R 3.5.1
+#####Bioconductor version 3.7#### R 3.4.2
 #
 # MStractor- A molecular feature extractor for mass spectrometry data
 #
