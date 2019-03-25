@@ -1,5 +1,5 @@
 # MStractor 
-Please note that this version of the script has been tested  using Bioconductor version 3.7 and R version 3.4.2. 
+Please note that this version of the script has been tested  using Bioconductor version 3.8 and R version 3.5.3. 
 
 MStractor is an R workflow for non-targeted processing of LC-MS data 
 The MStractor workflow performs the following: 
