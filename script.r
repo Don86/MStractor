@@ -1,7 +1,5 @@
 
-#####Bioconductor version 3.7#### R 3.4.2
-#
-# MStractor- A molecular feature extractor for mass spectrometry data
+#####Bioconductor version 3.8#### R 3.5.3
 #
 #######################################################
 #                                                     #
@@ -95,13 +93,13 @@ gc()
 #       "/home/$HOME" on Linux
 
 #pathToProject <- "D:/MStractorDemo"
-pathToProject <- "C:/Users/your working directory/MStractor_dataset"# "your working directory" correponds to the path where the example data set is saved
+pathToProject <- "C:/Users/luca.nicolotti/Desktop/"
 setwd(pathToProject)
 getwd()
 
 # Specify a "typical" MS file which can be considered a reference. Leave blank
 # for MStractorDemo.
-ref <- "./MSfiles/Pooled/pooled_R1.mzXML"
+ref <- "./MSfiles/Fig_pre/Fig_pre_R2_2f3_01_19898.mzXML"
 
 #QCdataAll <- TRUE # IF TRUE, EICs for every molecular feature will be plotted
 CPUs <- "max"      # Concurrent CPU threads to run. "max" to autodetect
@@ -161,6 +159,7 @@ fileType <- "mzXML" # MS data file type e.g. "mzData", "mzML", "mzXML", "CDF"
 
 # "Prepare Environment" - Installed required software etc -----------------
 # Install software dependencies
+
 libUser <- Sys.getenv("R_LIBS_USER")
 
 update.packages(ask= updatePackages,lib= libUser)
@@ -168,34 +167,55 @@ update.packages(ask= updatePackages,lib= libUser)
 # Install packages from CRAN
 # Add required packages to this list
 #pkgsCRAN <- c("snow","tools","Rcpp","rgl","parallel")
-pkgsCRAN <- c("snow", "RANN")
 
-for (i in pkgsCRAN) {
-  if(i %in% rownames(installed.packages()) == FALSE)
-  {install.packages(i, dependencies= TRUE, lib = libUser)}
-}
+install.packages('RANN')
+install.packages('snow')
+install.packages('pander')
+install.packages('plyr')
+install.packages("dplyr")
+install.packages("ggpubr")
+install.packages('gtools')
+install.packages('sm')
+install.packages('plotly', dependencies= TRUE)
+install.packages('htmltools', dependencies= TRUE)
+install.packages('tidyr', dependencies= TRUE)
+install.packages('MSeasy', dependencies= TRUE)
+install.packages("berryFunctions")
+install.packages("magrittr")
+install.packages("fda")
 
-# Install packages from Bioconductor
-# Add required packages to this list
-pkgsBioC <- c("xcms","CAMERA","modeest","mzR")
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
 
-if ((basename(pathToProject) == "MStractorDemo")
-    | basename(pathToProject) == ""){
-  pkgsBioC <- c(pkgsCRAN,"faahKO")
-}
-
-source("https://bioconductor.org/biocLite.R")
-biocLite("xcms")
-biocLite("CAMERA") # Don't update any package
+BiocManager::install("xcms", version = "3.8")
+BiocManager::install("CAMERA", version = "3.8")
+BiocManager::install("modeest", version = "3.8")
 
 
-# Load libraries
+
+
+
+
 library(xcms)
 library(RANN)
 library(modeest)
 library(CAMERA)
 library(tools)
 library(parallel)
+library(pander)
+library(magrittr)
+library(scales)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(sm)
+library(gtools)
+library(plotly)
+library(htmltools)
+library(tidyr)
+library(MSeasy)
+library(berryFunctions)
+library(fda)
 
 # "Create dataset" - Extract data from MS files ---------------------------
 
@@ -243,22 +263,38 @@ if (basename(pathToProject) == "MStractorDemo"){
 
 cat("The following MS files have been loaded:\n", rawfiles, fill= TRUE, sep="")
 
+########################define file name
+#####it is important that the first part of the file name is matching the folder name within the MSfiles folder
+#and then define that with R1 and R2, e.g.: "MSfiles/Fig_Post/Fig_Post_R1_2f4_01_19899.mzXML"
 
 
+files<-basename(list.files(path="./MSfiles", recursive = TRUE, full.names=FALSE))
+sn<-list()
+
+
+for (i in 1:length(files)){
+ divide<-strsplit(files[i],".mzXML")
+ sn[[i]]<-divide
+ }
+
+Files<-unlist(sn)
 
 # Load a reference file & define the scan range
 # Set mz step size for seeking new EIC traces
+
 profmethod <- "bin"
 profStep <- mzErrAbs*4
 refRaw <- xcmsRaw(ref, profstep= profStep, includeMSn= FALSE, mslevel= NULL,
                   scanrange= NULL)
 refRaw
+
 # Plot TIC of reference sample to file
 dir.create("./QC")
 graphics.off()
 png("./QC/Ref_TIC.png", width = 1024, height = 768, units = "px")
 plotTIC(refRaw, ident= FALSE, msident= FALSE)
 dev.off()
+
 
 # Determine scan range
 scanStart <- head(which(refRaw@scantime > rtStart & refRaw@scantime < rtEnd),
@@ -286,19 +322,80 @@ integ <- 1
 fitGauss <- FALSE
 sleep <- 0
 
+# Plot picked peaks to file
+#sleep <- 0.001
+#png(file.path("./QC/Pks/%003d.png"), h=768, w=1024)
+refPks <- findPeaks(refRaw, method= 'centWave', ppm= mzErrPpmMin*2,
+                    peakwidth= c(pwMin, pwMax), snthresh= snThresh,
+                    prefilter= c(5,intThresh), mzCenterFun= "mean",
+                    integrate= integ, mzdiff= mzdiff, verbose.columns= TRUE,
+                    fitgauss= fitGauss, noise= intThresh, sleep= sleep)
+#dev.off()
+#Pks <- refPks[,c("rt","mz","maxo","into","intb","sn","egauss")]
+#write.table(Pks, file= "./Pks.tsv", sep="\t")
 
-# Create xcms data set
+png("./QC/Ref_EICs_100.png", width = 1024, height = 768, units = "px")
+plotPeaks(refRaw, refPks,  c(10,10), width = FWHM_min*10)
+dev.off()
+
+
+
+# with the new script first an XCMSnEXP object is created , then it is necessary to translate that  in an XCMS object and check the sampclass
 # Using Centwave
 # N.B. Whilst Centwave does not perform binning (it uses the raw data directly)
 # downstream methods such as getEIC will use the step paramter
+cladir<-dirs('./MSfiles//', full.names=FALSE)
 
-xset <- xcmsSet(rawfiles, profmethod= "bin", profparam= list(step= profStep),
-                method='centWave', ppm= mzErrPpmMin*2,
-                peakwidth= c(pwMin, pwMax), snthresh= snThresh,
-                prefilter= c(3,intThresh), mzCenterFun= "wMean",
-                integrate= integ, mzdiff= mzErrAbs/2, verbose.columns= TRUE,
-                fitgauss= fitGauss, scanrange= c(scanStart,scanEnd),
-                nSlaves= CPUs)
+dlf<-vector()
+for (i in 1:length(cladir)){
+detfls<-length(list.files(path =(paste(pathToProject,'/MSfiles/',cladir[i], sep=''))))
+dlf<-c(dlf,detfls)
+}
+
+samplegroup<-vector()
+for (i in 1:length(dlf)){
+sg<-rep(cladir[i],dlf[i])
+samplegroup<-c(samplegroup,sg)
+}
+
+cols <- rainbow(length(cladir))
+ClassCol<-vector()
+for (i in 1:length(dlf)){
+sc<-rep(cols[i],dlf[i])
+ClassCol<-c(ClassCol,sc)
+}
+
+pd <- data.frame(sample_name = sub(basename(rawfiles), pattern = ".mzXML",
+                                   replacement = "", fixed = TRUE),
+                 sample_group = samplegroup,
+                 stringsAsFactors = FALSE)
+
+
+
+raw_data <- readMSData(files = rawfiles, pdata = new("NAnnotatedDataFrame", pd), mode = "onDisk")
+
+ 
+## Get the base peak chromatograms. This reads data from the files.
+png("./overlaid_BPSchromatograms.png", width = 1024, height = 768, units = "px")
+bpis <- chromatogram(raw_data, aggregationFun = "max")
+plot(bpis, col = ClassCol)
+legend("topright", box.lwd = 2, legend=c(pd$sample_group), pch=c(15, 15,15, 16, 16,16,17,17,17),
+col =ClassCol, xpd=FALSE)
+
+dev.off()
+##peak detection and creation of an XCMSnEXP object.
+cwp <- CentWaveParam(peakwidth = c(30, 90), snthresh = snThresh , prefilter= c(3,intThresh),  integrate = integ, fitgauss = FALSE, 
+noise = 0, verboseColumns = FALSE, firstBaselineCheck = TRUE, ppm=6.06, mzCenterFun= "wMean")### peak det param are the same used in the old script 
+
+xdata <- findChromPeaks(raw_data, param = cwp)
+spn<-xdata@phenoData$sample_name
+
+
+xset <- as(xdata, "xcmsSet")# turns the XCMSnExp object into a xcms set object 
+
+sampclass(xset)<-factor((xdata$sample_group))
+sampnames(xset)<-spn
+
 
 xset # To checkout slots use slotNames(xset); ls(xset@groups)
 
@@ -412,6 +509,8 @@ getTICs(xcmsSet= xset, pngName= "./QC/TICs_Raw.png", rt= "raw")
 
 # Get EICs
 xset_grps <- xset@groups
+
+
 eicRange <- 2*mean(c(FWHM_min,FWHM_max))
 eicsRaw <- getEIC(xset, mzrange=xset_grps, rtrange= eicRange ,
                   groupidx = 1:nrow(xset_grps), rt= "raw")
@@ -480,6 +579,12 @@ xs_an <- findIsotopes(xs_an, maxcharge=mzZmax, maxiso=4, ppm= ppm,
 xs_an <- groupCorr(xs_an, cor_eic_th= 0.7, pval=0.1,
                    graphMethod="hcs", calcIso= TRUE, calcCiS = TRUE,
                    calcCaS= TRUE, cor_exp_th= 0.7)
+				   
+				   
+				   
+       
+
+			   
 # Not appropriate for EI spectra
 #xs_an <- findAdducts(xs_an, ppm= ppm, mzabs= mzabs, multiplier= 3,
 #                     polarity= mzPol)
@@ -507,6 +612,8 @@ PksAnFilt <- droplevels(PksAn[PksAn$pcgroup %in% names(pcgroups)
 # 3. Determine median signal intensity
 sNames <- sampnames(xs)
 RespMed <- apply(PksAnFilt[c(sNames)], 1, median, na.rm= TRUE)
+
+RespMed <- apply(PksAnFilt[c(11:19)], 1, median, na.rm= TRUE)
 PksAnFilt <-cbind(PksAnFilt, RespMed)
 
 # 4. Keep only the most intense signal from each pcgroup
@@ -571,3 +678,62 @@ BasePksCur <- BasePks[sprintf("%03d",as.numeric(rownames(BasePks))) %in% pks,]
 write.table(BasePksCur[with(BasePksCur, order(rt,mz)), ],
             file= paste("PksBPsCurated", "tsv", sep="."),
             sep= "\t", col.names= NA, row.names= TRUE)
+			
+			
+		
+			
+##AUTOMATIC MEDIAN NORMALISATION
+BasePksCur<-BasePksCur[with(BasePksCur, order(rt,mz)), ]
+sub1<-colnames(BasePksCur)	
+replicates<-which(sub1%in%Files)
+BasePksCur$rt<-BasePksCur$rt/60 
+BasePksCurSel<-subset(BasePksCur, select=replicates)
+Median<-apply(BasePksCurSel, 2, FUN = median)
+norm<-sweep(BasePksCurSel, 2, Median, `/`)
+AIN<-c(1,4)
+AdditionalInfo<-subset(BasePksCur, select=AIN)
+NormalizedMatrix<-merge(AdditionalInfo, norm, by="row.names")
+NormalizedMatrix$Row.names <- NULL
+NormalizedMatrix<-NormalizedMatrix[with(NormalizedMatrix, order(rt,mz)), ]
+rownames(NormalizedMatrix)<-rownames(AdditionalInfo)
+NormalizedMatrix<-format(round(NormalizedMatrix, 2), nsmall = 2)
+mz<-format(as.numeric(NormalizedMatrix$mz), trim=FALSE, digits=0)
+NormalizedMatrix$mz<-mz
+write.table(NormalizedMatrix[with(NormalizedMatrix, order(rt,mz)), ],file= paste("NormalizedMatrix", "tsv", sep="."), sep= "\t", col.names= NA, row.names= TRUE)
+
+#DESCRIPTIVE STATISTICS
+
+#identify data classes
+classes<-dir("./MSfiles/", full.names=FALSE, all.files=FALSE)
+
+set<-rep(list(vector()), length(classes) )
+for (i in 1:length(classes)){
+ categories <- which(grepl(classes[i],Files))
+ set[[i]]<-categories
+}
+
+Files[set[[1]]]
+
+options("scipen"=999) # disables scientific notation
+
+descriptive_stats<-rep(list(matrix()), length(classes))
+
+#####for loop responsible for running Descriptive_statistics 
+for (i in 1:length(set)){
+ selection <- as.matrix(subset(norm, select=Files[set[[i]]]))
+ stdev<-as.matrix(apply(selection, 1, sd)); colnames(stdev)<-paste('St.Dev.',classes[i])
+ average<-as.matrix(apply(selection, 1, mean)); colnames(average)<-paste('Average',classes[i])  
+ cv<-as.matrix((stdev/average)*100); colnames(cv)<-paste('CV%',classes[i])
+ statsb<-as.matrix(cbind(selection, (cbind(average, stdev, cv))))
+ class_stats<-as.matrix(format(round(statsb, 2), nsmall = 2))
+ class(class_stats)<-'numeric'
+ class_statsdf<-as.data.frame(class_stats)
+ descriptive_stats[[i]]<-class_statsdf
+ }
+ ###the average stdev and rsd values are calculated with 5 decimal figures. When the descriptive statistic is printed values are reported with to 2 decimal figures
+
+# Print descriptive statistics results
+
+for (i in 1:length(descriptive_stats)){
+  write.table(descriptive_stats[[i]], paste("./","Descriptive_Stats_func", classes[[i]], (".tsv")),sep=" \t", row.names=TRUE) 
+}
