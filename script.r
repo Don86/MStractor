@@ -1,5 +1,6 @@
 
 #####Bioconductor version 3.8#### R 3.5.3
+# MStractor- A molecular feature extractor for mass spectrometry data
 #
 #######################################################
 #                                                     #
@@ -683,23 +684,46 @@ write.table(BasePksCur[with(BasePksCur, order(rt,mz)), ],
 		
 			
 ##AUTOMATIC MEDIAN NORMALISATION
+
+
+colnum<-ncol(BasePksCur)
+BasePksCur$id <- rownames(BasePksCur)
+idcolnum<-ncol(BasePksCur)
+
+BasePksCur<-BasePksCur[c(idcolnum,1:colnum)]
+
+
+
 BasePksCur<-BasePksCur[with(BasePksCur, order(rt,mz)), ]
+BasePksCur$rt<-BasePksCur$rt/60
+AIN<-BasePksCur[,c(1,2,5)]
+write.table(AIN,file= paste("AIN", "tsv", sep="."),
+            sep= "\t", col.names= TRUE, row.names= FALSE)
+
 sub1<-colnames(BasePksCur)	
 replicates<-which(sub1%in%Files)
-BasePksCur$rt<-BasePksCur$rt/60 
 BasePksCurSel<-subset(BasePksCur, select=replicates)
-Median<-apply(BasePksCurSel, 2, FUN = median)
+SimpMatrix<-merge(AIN, BasePksCurSel, by="row.names");SimpMatrix[,1]<-NULL
+
+write.table(SimpMatrix[with(SimpMatrix, order(rt,mz)), ],
+            file= paste("Simp_Curated", "tsv", sep="."),
+            sep= "\t", col.names= NA, row.names= TRUE)  #### matrix with simplified inputs
+			
+			
+Median<-apply(BasePksCurSel, 2, FUN = median, na.rm=TRUE)
 norm<-sweep(BasePksCurSel, 2, Median, `/`)
-AIN<-c(1,4)
-AdditionalInfo<-subset(BasePksCur, select=AIN)
-NormalizedMatrix<-merge(AdditionalInfo, norm, by="row.names")
-NormalizedMatrix$Row.names <- NULL
-NormalizedMatrix<-NormalizedMatrix[with(NormalizedMatrix, order(rt,mz)), ]
-rownames(NormalizedMatrix)<-rownames(AdditionalInfo)
-NormalizedMatrix<-format(round(NormalizedMatrix, 2), nsmall = 2)
-mz<-format(as.numeric(NormalizedMatrix$mz), trim=FALSE, digits=0)
-NormalizedMatrix$mz<-mz
-write.table(NormalizedMatrix[with(NormalizedMatrix, order(rt,mz)), ],file= paste("NormalizedMatrix", "tsv", sep="."), sep= "\t", col.names= NA, row.names= TRUE)
+NormalizedMatrix<-merge(AIN, norm, by="row.names");NormalizedMatrix[,1]<-NULL
+t<-format(round(NormalizedMatrix[,2:ncol(NormalizedMatrix)], 4), nsmall = 4)
+NormalizedMatrix[,2:ncol(NormalizedMatrix)]<-t	
+
+NormalizedMatrix[,3]<-as.numeric(NormalizedMatrix[,3])
+NormalizedMatrix[,2]<-as.numeric(NormalizedMatrix[,2])	
+
+fix(NormalizedMatrix) # check all the columns but id are numeric
+
+write.table(NormalizedMatrix[with(NormalizedMatrix, order(rt,mz)), ],
+            file= paste("NormalizedMatrix", "tsv", sep="."),
+            sep= "\t", col.names= NA, row.names= TRUE)  #### matrix with simplified inputs
 
 #DESCRIPTIVE STATISTICS
 
@@ -720,7 +744,7 @@ descriptive_stats<-rep(list(matrix()), length(classes))
 
 #####for loop responsible for running Descriptive_statistics 
 for (i in 1:length(set)){
- selection <- as.matrix(subset(norm, select=Files[set[[i]]]))
+ selection <- as.matrix(subset((NormalizedMatrix), select=Files[set[[i]]]))
  stdev<-as.matrix(apply(selection, 1, sd)); colnames(stdev)<-paste('St.Dev.',classes[i])
  average<-as.matrix(apply(selection, 1, mean)); colnames(average)<-paste('Average',classes[i])  
  cv<-as.matrix((stdev/average)*100); colnames(cv)<-paste('CV%',classes[i])
