@@ -1,0 +1,477 @@
+---
+title: "untargeted-wf"
+output: html_document
+---
+
+# Untargeted Workflow for Untargeted Experiments.
+Author: Jeremy Hack
+```{r}
+# Load libraries
+library(xcms)
+library(RANN)
+library(modeest)
+library(CAMERA)
+library(tools)
+library(parallel)
+library(pander)
+library(magrittr)
+library(scales)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(sm)
+library(gtools)
+library(plotly)
+library(htmltools)
+library(tidyr)
+#library(MSeasy) Removed from CRAN
+library(berryFunctions)
+library(fda)
+```
+
+
+Set working directory in `pathToProject`:
+```{r message=FALSE}
+pathToProject <- "/Users/don/OneDrive\ -\ The\ University\ of\ Melbourne/MStractor-demo"
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir=pathToProject)
+```
+
+## Input Params
+```{r}
+# Specify a "typical" MS file which can be considered a reference. Leave blank for MStractorDemo.
+ref <- "./MSfiles/Pooled/pooled_R1.mzXML"
+#QCdataAll <- TRUE # IF TRUE, EICs for every molecular feature will be plotted
+CPUs <- "max"      # Concurrent CPU threads to run. "max" to autodetect
+updatePackages <- "FALSE" # If TRUE, all packages will be automatically updated
+fastmode <- "FALSE" # If FALSE, does not generate any .pngs
+
+## Chromatography parameters, tuned to faahKO data (Agilent 1100 400 bar HPLC)
+rtStart <- 1    # Start region of interest (in seconds)
+rtEnd <- "max"  # End region of interest (in seconds). "max" for RT full range
+FWHM_min <- 10  # FWHM in seconds of narrowest peak (10)
+FWHM_max <- 90  # FWHM in seconds of broadest peak (40)
+rtDelta <- 3705-3673   # Max observed difference in retention time (s) across all
+# samples (peak apex to peak apex delta).
+
+
+## MS parameters, tuned for faahKO data (Agilent MSD SL ion trap)
+mzPol <- "negative" # Set to "positive" or "negative" ion mode
+mzStart <- 100  # Start of m/z region of interest
+mzEnd <- 1650   # End of m/z region of interest
+mzErrAbs <- 0.01 # Max m/z delta expected for the same feature across all samples
+mzZmax <- 3     # Max charge state expected
+EICsMax <- 30   # Max number of chrom. peaks expected for a single EIC
+sens <- 1      # Factor (between 0 and 1) for peak extraction sensitivity
+# Impacts peak picking thresholds, RAM & CPU utilisation.
+# Start with ~0.5.
+fileType <- "mzXML" # MS data file type e.g. "mzData", "mzML", "mzXML", "CDF"
+```
+
+
+## Create Dataset
+```{r}
+runtimeStart<- Sys.time()
+source("untargeted-wf-lib.R")
+
+if (CPUs == "max"){
+  CPUs <- detectCores(all.tests= TRUE, logical= TRUE)
+}
+print(paste0(CPUs, " CPUs detected."))
+
+# WARNING: this can be shortened? A lot of repeated code.
+if (basename(pathToProject) == "MStractorDemo"){
+  datapath <- file.path(find.package("faahKO"), "cdf")
+  rawfiles <- dir(datapath, full.names=TRUE, pattern="\\.CDF", recursive=TRUE)
+  ref <- paste(datapath,"/WT/wt19.CDF", sep= "")
+} else if (fileType == "CDF"){
+  datapath <- paste(pathToProject,"MSfiles" , sep="/")
+  rawfiles <- dir(datapath, full.names=TRUE,
+                  pattern="\\.CDF", recursive=TRUE)
+} else if (fileType == "mzData"){
+  datapath <- paste(pathToProject,"MSfiles" , sep="/")
+  rawfiles <- dir(datapath, full.names=TRUE,
+                  pattern="\\.mzData", recursive=TRUE)
+} else if (fileType == "mzML"){
+  datapath <- paste(pathToProject,"MSfiles" , sep="/")
+  rawfiles <- dir(datapath, full.names=TRUE,
+                  pattern="\\.mzML", recursive=TRUE)
+} else if (fileType == "mzXML"){
+  datapath <- paste(pathToProject,"MSfiles" , sep="/")
+  rawfiles <- dir(datapath, full.names=TRUE,
+                  pattern="\\.mzXML", recursive=TRUE)
+} else (cat("No raw files found!\n\nSupported filetypes include:
+            \n CDF \n mzData \n mzML \n mzXML", fill= FALSE)
+)
+
+cat("The following MS files have been loaded:\n", rawfiles, fill= TRUE, sep="")
+
+```
+### Define file name
+
+```{r}
+files<-basename(list.files(path="./MSfiles", recursive = TRUE, full.names=FALSE))
+Files<-gsub(".mzXML", "", files)
+```
+
+Load the reference file specified in `ref` & define the scan range. Set mz step size for seeking new EIC traces.
+```{r}
+profmethod <- "bin"
+profStep <- mzErrAbs*4
+refRaw <- xcmsRaw(ref, profstep= profStep, includeMSn= FALSE, mslevel= NULL,scanrange= NULL)
+```
+
+Plot TIC inline, and save it as a `.png` to a `/QC` folder. If the `/QC` folder doesn't exist, one will be created. 
+```{r}
+if (fastmode == TRUE) {
+  dir.create("./QC")
+  graphics.off()
+  pdf("./QC/Ref_TIC.pdf")
+  plotTIC(refRaw, ident= FALSE, msident= FALSE)
+  dev.off()
+}
+```
+
+*Edit*: `scanStart` and `scanEnd` should be user-input params, instead of being automatically read off `refRaw@scantime`. `scanStart` and `scanEnd` are global params that don't change after you've read them off the TIC once at the start.
+
+Qn for Luca: "Quantile-driven threshold selection" for `intThresh`?
+```{r}
+# Determine scan range (indices)
+# scanStart := index of first scantime > rtStart and < rtEnd
+scanStart <- head(which(refRaw@scantime > rtStart & refRaw@scantime < rtEnd), n=1)
+
+if (identical(rtEnd, "max")) {
+  scanEnd <- max(refRaw@scanindex)
+  rtEnd <- refRaw@scantime[which(refRaw@scanindex == scanEnd)]
+} else {
+  scanEnd <- tail(which(refRaw@scantime > rtStart & refRaw@scantime < rtEnd), n=1)
+}
+
+print(paste0("scanStart=", scanStart, "; scanEnd=", scanEnd))
+
+# Calculate peak picking parameters
+pwMin <- FWHM_min*1.3
+pwMax <- pwMin*1.3
+mzErrPpmMin <- mzErrAbs/2/mzEnd*1000000
+mzErrPpmMax <- mzErrAbs/2/mzStart*1000000
+mzErrPpmMean <- mean(c(mzErrPpmMin,mzErrPpmMax))
+mzdiff <- mzErrAbs/5
+intThresh <- as.integer(quantile(refRaw@env$intensity,1-sens)*10) 
+snThresh <- 30/sens
+integ <- 1
+fitGauss <- TRUE
+sleep <- 0
+```
+
+Find peaks. 
+```{r}
+refPks <- findPeaks(refRaw, 
+                    method='centWave', 
+                    ppm=mzErrPpmMin*2,
+                    peakwidth=c(pwMin, pwMax), 
+                    snthresh=snThresh,
+                    prefilter=c(5,intThresh), 
+                    mzCenterFun="mean",
+                    integrate=integ, 
+                    mzdiff=mzdiff, 
+                    verbose.columns= TRUE,
+                    fitgauss=fitGauss, 
+                    noise=intThresh, 
+                    sleep=sleep)
+```
+Plot picked peaks, and save.
+```{r}
+
+#dev.off()
+#Pks <- refPks[,c("rt","mz","maxo","into","intb","sn","egauss")]
+#write.table(Pks, file= "./Pks.tsv", sep="\t")
+if (fastmode==TRUE) {
+  pdf("./QC/Ref_EICs_100.pdf")
+  #png("./QC/Ref_EICs_100.png", width = 1024, height = 768, units = "px")
+  plotPeaks(refRaw, refPks,  c(10,10), width = FWHM_min*10)
+  dev.off()
+}
+```
+With the new script first an `XCMSnEXP` object is created , then it is necessary to translate that in an XCMS object and check the sampclass using Centwave. N.B. Whilst Centwave does not perform binning (it uses the raw data directly), downstream methods such as `getEIC` will use the step parameter.
+
+```{r}
+cladir<-dirs('./MSfiles//', full.names=FALSE)
+
+dlf<-vector()
+for (i in 1:length(cladir)){
+  detfls<-length(list.files(path =(paste(pathToProject,'/MSfiles/',cladir[i], sep=''))))
+  dlf<-c(dlf,detfls)
+}
+
+samplegroup<-vector()
+for (i in 1:length(dlf)){
+  sg<-rep(cladir[i],dlf[i])
+  samplegroup<-c(samplegroup,sg)
+}
+
+cols <- rainbow(length(cladir))
+ClassCol<-vector()
+for (i in 1:length(dlf)){
+  sc<-rep(cols[i],dlf[i])
+  ClassCol<-c(ClassCol,sc)
+}
+
+pd <- data.frame(sample_name = sub(basename(rawfiles), pattern = ".mzXML",
+                                   replacement = "", fixed = TRUE),
+                 sample_group = samplegroup,
+                 stringsAsFactors = FALSE)
+
+raw_data <- readMSData(files = rawfiles, pdata = new("NAnnotatedDataFrame", pd), mode = "onDisk")
+```
+
+Generate BPC and TICs from all files (`raw_data`). 
+```{r message=FALSE}
+png("./QC/overlaid_BPC.png", width = 1024, height = 768, units = "px")
+bpis <- chromatogram(raw_data, aggregationFun = "max")
+plot(bpis, col = ClassCol)
+legend("topright", box.lwd = 2, legend=c(pd$sample_group), pch=c(15, 15,15, 16, 16,16,17,17,17),
+col =ClassCol, xpd=FALSE)
+dev.off()
+
+png("./QC/overlaid_TIC.png", width = 1024, height = 768, units = "px")
+bpis <- chromatogram(raw_data, aggregationFun = "sum")
+plot(bpis, col = ClassCol)
+legend("topright", box.lwd = 2, legend=c(pd$sample_group), pch=c(15, 15,15, 16, 16,16,17,17,17),
+col =ClassCol, xpd=FALSE)
+
+dev.off()
+```
+Peak detection and creation of an `XCMSnEXP` object.
+```{r}
+cwp <- CentWaveParam(peakwidth = c(30, 90), 
+                     snthresh = snThresh, 
+                     prefilter= c(3,intThresh),  
+                     integrate = integ, 
+                     fitgauss = FALSE, 
+                     noise = 0, 
+                     verboseColumns = FALSE, 
+                     firstBaselineCheck = TRUE, 
+                     ppm=6.06, 
+                     mzCenterFun= "wMean")### peak det param are the same used in the old script 
+xdata <- findChromPeaks(raw_data, param = cwp)
+spn<-xdata@phenoData$sample_name
+xset <- as(xdata, "xcmsSet")# turns the XCMSnExp object into a xcms set object
+
+sampclass(xset)<-factor((xdata$sample_group))
+sampnames(xset)<-spn
+
+
+xset # To checkout slots use slotNames(xset); ls(xset@groups)
+```
+
+Determine the lowest level of replication within a class?
+```{r}
+classes <- list.dirs(datapath, full.names= FALSE, recursive= FALSE)
+classSize <- vector(length= length(classes))
+dirs <- list.dirs(datapath, full.names= TRUE, recursive= FALSE)
+lst <- vector("list", length(dirs))
+names(lst) <- dirs
+for (i in 1:length(dirs)){
+  classSize[i] <- length(dir(dirs[i]))
+}
+minClassSize <- min(classSize)
+#medClassSize <- median(classSize)
+#aveClassSize <- ave(classSize)
+#modeClassSize <- mfv(classSize)
+
+#bw <- FWHM_min/2
+mzWid <- mzErrAbs
+bw <- mzWid/2
+minsamp <- ceiling(minClassSize)-1
+
+
+# group-methods {xcms}
+# A peak group is considered valid when it contains either, the minimum number
+# of samples set by minSamp, OR at least one sample class satisfies minFrac.
+
+# See groupChromPeaks(), which uses the PeakDensityParam() object as param input, 
+# and adjustRtime(), which uses PeakGroupsParam()
+
+xset <- group(
+   xset, method= "density", bw= 3, minfrac= 0.3, minsamp= minsamp,
+   mzwid= mzWid, max= EICsMax, sleep= 0)
+
+```
+
+```{r}
+getTICs(xcmsSet= xset, pngName= "./QC/TICs_Raw.png", rt= "raw")
+
+# Get EICs
+xset_grps <- xset@groups
+# optional  write.table(xset@groups,file= "./QC/xsgroup.tsv", sep= "\t")
+eicRange <- 2*mean(c(FWHM_min,FWHM_max))
+eicsRaw <- getEIC(xset, mzrange=xset_grps, rtrange= eicRange ,
+                  groupidx = 1:nrow(xset_grps), rt= "raw")
+
+# Plot as individual PNGs
+if (fastmode == TRUE) {
+  dir.create("./QC/EICs_Raw/")
+  do.call(file.remove,list(list.files("./QC/EICs_Raw", full.names= TRUE)))
+  graphics.off()
+  png(file.path("./QC/EICs_Raw/%003d.png"), h=768, w=1024)
+  plot(eicsRaw, xset)
+  dev.off()
+}
+```
+
+
+```{r}
+# Export matrix prior to RT Alignment -------------------------------------
+xsTable <- peakTable(xset, filebase= "./QC/xsTable", method= "medret",
+                     value= "maxo")
+
+write.table(xsTable[with(xsTable, order(rt, mz)), ],
+            file= "./QC/xsTable.tsv", sep= "\t", quote= FALSE, col.names= NA)
+```
+
+# RT Alignment
+```{r}
+align_ref <- match(basename(ref),basename(rawfiles[]))
+
+pdf("./QC/rtAlignLoess.pdf", w=1280, h=1024)
+xsAlign <- retcor(xset, method= "loess", missing= 3, extra= 0, span= 0.3,
+                  family= "gaussian", plottype= "deviation")
+dev.off()
+xsAlign
+```
+
+```{r}
+xsAlign <- group(
+  xsAlign, method= "nearest", mzVsRTbalance= 10, mzCheck= mzErrAbs,
+  rtCheck= rtDelta, kNN=10)
+xsAlign
+```
+
+```{r}
+# Plot TICs
+getTICs(xcmsSet= xsAlign, pngName= "./QC/TICs_Aligned.png", rt= "corrected")
+```
+
+```{r}
+xsFilled <- fillPeaks(xsAlign, method="chrom", nSlaves=CPUs)
+
+# Plot EICs
+xsFilledGrps <- xsFilled@groups
+eicsFilled <- getEIC(xsFilled, mzrange= xsFilledGrps, rtrange= FWHM_max*2,
+                     groupidx= 1:nrow(xsFilledGrps), rt= "corrected")
+
+
+dir.create("./QC/EICs_Aligned/")
+do.call(file.remove,list(list.files("./QC/EICs_Aligned", full.names= TRUE)))
+if (fastmode == TRUE) {
+  graphics.off()
+  png(file.path("./QC/EICs_Aligned/%003d.png"), h=768, w=1024)
+  
+  plot(eicsFilled, xsFilled)
+  dev.off()
+}
+```
+
+Reconstruct Spectra - Construct deconvoluted spectra
+```{r}
+ppm <- mzErrPpmMean/2
+mzabs <- mzErrAbs
+minfrac <- minClassSize/length(rawfiles)
+xs <- xsFilled # Choose an xcmxSet object
+
+# Using CAMERA:
+xs_an <- xsAnnotate(xs, polarity= mzPol, nSlaves= 1) # nSlaves>1 is broken
+xs_an <- groupFWHM(xs_an, sigma= 6, perfwhm= 1, intval= "maxo")
+
+xs_an <- findIsotopes(xs_an, maxcharge=mzZmax, maxiso=4, ppm= ppm,
+                      mzabs= mzabs, intval="maxo", minfrac=minfrac,
+                      filter= TRUE)
+xs_an <- groupCorr(xs_an, cor_eic_th= 0.7, pval=0.1,
+                   graphMethod="hcs", calcIso= TRUE, calcCiS = TRUE,
+                   calcCaS= TRUE, cor_exp_th= 0.7)
+
+PksAn <- getPeaklist(xs_an, intval="maxo")
+
+#PksAn <- PksAn[order(as.numeric(PksAn$rt)),]
+
+write.table(PksAn, file=paste("./QC/Pks_An", "tsv", sep="."), sep= "\t",
+            col.names= NA, row.names= TRUE)
+```
+
+Export Matrix - Filter peaks and export basepeak matrix
+```{r}
+# 1. Filter lone groups.
+# Count number of entities for each factor
+pcgroups <- table(PksAn$pcgroup)
+min_ions <- 2
+PksAnFilt <- droplevels(PksAn[PksAn$pcgroup %in% names(pcgroups)
+                              [pcgroups >= min_ions],,drop=FALSE])
+
+# 2. Optionally, select signals that are part of an isotope group
+#PksAnFilt <- PksAnFilt[PksAnFilt$isotopes != "", ]
+#PksAnFilt <- PksAn[PksAn$isotopes != "", ]
+
+# 3. Determine median signal intensity
+sNames <- sampnames(xs)
+RespMed <- apply(PksAnFilt[c(sNames)], 1, median, na.rm= TRUE)
+
+RespMed <- apply(PksAnFilt[c(11:19)], 1, median, na.rm= TRUE)
+PksAnFilt <-cbind(PksAnFilt, RespMed)
+
+# 4. Keep only the most intense signal from each pcgroup
+# Other values may be preferred
+#RespMed <- PksAnFilt$RespMed
+# May be required if factors aren't recognised
+# PeakList$pcgroup <- as.factor(PeakList$pcgroup)
+BasePks <- PksAnFilt[ RespMed == ave(RespMed, PksAnFilt$pcgroup,
+                                     FUN= function(RespMed) max(RespMed))
+                      , ]
+# BasePks[order(as.numeric(BasePks$pcgroup)),]
+
+write.table(BasePks[with(BasePks, order(rt, mz)), ],
+            file=paste("Pks_BPs", "tsv", sep="."), sep= "\t",
+            col.names= NA, row.names= TRUE)
+```
+
+Fetch basePeak EICs
+```{r}
+BP_EICs <- paste(sprintf("%03d",as.numeric(rownames(BasePks))),"png", sep= ".")
+
+dir.create("./EICs_BasePeaks/")
+do.call(file.remove,list(list.files("./EICs_BasePeaks/", full.names= TRUE)))
+for (i in 1:length(BP_EICs)){
+  sourceF <- paste("./QC/EICs_Aligned/", BP_EICs[i], sep= "")
+  destF <- paste("./EICs_BasePeaks/", BP_EICs[i], sep= "")
+  file.copy(from= sourceF, to= destF, overwrite= FALSE)
+}
+
+dir.create("./EICs_BasePeaks_Curated/")
+do.call(file.remove,list(list.files("./EICs_BasePeaks_Curated/",
+                                    full.names= TRUE)))
+for (i in 1:length(BP_EICs)){
+  sourceF <- paste("./QC/EICs_Aligned/", BP_EICs[i], sep= "")
+  destF <- paste("./EICs_BasePeaks_Curated/", BP_EICs[i], sep= "")
+  file.copy(from= sourceF, to= destF, overwrite= TRUE)
+}
+
+```
+
+# Stop watch
+```{r}
+sessionInfo <- sessionInfo()
+
+now <- Sys.time()
+time <- unclass(as.POSIXlt(now))
+timeStamp <-paste(time$year,time$mon, time$mday, time$hour, time$min, sep="_")
+imageName <- paste(timeStamp, "RData", sep= ".")
+save.image(imageName)
+historyName <- paste(timeStamp,"RHistory", sep= ".")
+savehistory(historyName)
+
+runtimeEnd <- Sys.time()
+runtime <- runtimeEnd - runtimeStart
+runtime
+
+gc()
+```
+
